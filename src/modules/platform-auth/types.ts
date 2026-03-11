@@ -1,18 +1,18 @@
 export type PlatformAuthOptions = {
   /**
-   * 平台 API base URL，用於驗證 token 和 OAuth
+   * 平台域名（如 https://www.star-vaults.com）
    */
   platformApiUrl: string
 
   /**
-   * OAuth client ID（場景 2 用）
+   * ChainUp 開放平台 appKey（如 star-vaults_1692）
    */
-  clientId: string
+  appKey: string
 
   /**
-   * OAuth client secret（場景 2 用）
+   * ChainUp 開放平台 secretKey，用於簽名
    */
-  clientSecret: string
+  secretKey: string
 
   /**
    * OAuth 完成後前端的回調 URL
