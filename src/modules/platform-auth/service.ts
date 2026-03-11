@@ -6,6 +6,7 @@ import type {
   Logger,
 } from "@medusajs/framework/types"
 import type { PlatformAuthOptions } from "./types"
+import { generateChainupSign } from "../../utils/chainup-sign"
 
 type InjectedDependencies = {
   logger: Logger
@@ -32,18 +33,24 @@ class PlatformAuthService extends AbstractAuthModuleProvider {
         "platformApiUrl is required in platform-auth provider options."
       )
     }
-    if (!options.clientId || !options.clientSecret) {
+    if (!options.appKey || !options.secretKey) {
       throw new MedusaError(
         MedusaError.Types.INVALID_DATA,
-        "clientId and clientSecret are required in platform-auth provider options."
+        "appKey and secretKey are required in platform-auth provider options."
+      )
+    }
+    if (!options.callbackUrl) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "callbackUrl is required in platform-auth provider options."
       )
     }
   }
 
   /**
    * 認證入口：
-   * - 帶 token → 場景 1（平台內轉，直接驗證 token 取得 UID）
-   * - 不帶 token → 場景 2（OAuth 重導向）
+   * - 帶 token → 場景 1（平台內轉，用 exchange-token 驗證取得 UID）
+   * - 不帶 token → 場景 2（重導向到 ChainUp OAuth 登入頁）
    */
   async authenticate(
     data: AuthenticationInput,
@@ -58,6 +65,36 @@ class PlatformAuthService extends AbstractAuthModuleProvider {
     return this.handleOAuthRedirect(data)
   }
 
+  async register(
+    data: AuthenticationInput,
+    authIdentityProviderService: AuthIdentityProviderService
+  ): Promise<AuthenticationResponse> {
+    const token = data.body?.token as string | undefined
+    const code = (data.query?.code as string) || (data.body?.code as string)
+
+    if (token) {
+      return this.handlePlatformRedirect(token, authIdentityProviderService)
+    }
+
+    if (code) {
+      return this.validateCallback(
+        {
+          ...data,
+          query: {
+            ...data.query,
+            code,
+          },
+        },
+        authIdentityProviderService
+      )
+    }
+
+    return {
+      success: false,
+      error: "Missing token or authorization code",
+    }
+  }
+
   /**
    * OAuth callback 處理（場景 2）
    * 前端收到 code 後呼叫 POST /auth/customer/platform/callback?code=xxx
@@ -66,14 +103,29 @@ class PlatformAuthService extends AbstractAuthModuleProvider {
     data: AuthenticationInput,
     authIdentityProviderService: AuthIdentityProviderService
   ): Promise<AuthenticationResponse> {
-    const code = data.query?.code as string
+    const code = (data.query?.code as string) || (data.body?.code as string)
 
     if (!code) {
       return { success: false, error: "Missing authorization code" }
     }
 
     try {
-      const uid = await this.exchangeCodeForUid(code)
+      const { token, openId } = await this.exchangeCodeForToken(code)
+
+      // 優先用 token 查 UID，若平台不支援該 token 的 user_info 查詢，回退到 openId。
+      let uid: string
+      try {
+        uid = await this.verifyPlatformToken(token)
+      } catch (error: any) {
+        if (!openId) {
+          throw error
+        }
+        this.logger_.warn(
+          `OAuth token user_info lookup failed, fallback to openId identity: ${error.message}`
+        )
+        uid = String(openId)
+      }
+
       return this.findOrCreateIdentity(uid, authIdentityProviderService)
     } catch (error: any) {
       this.logger_.error(`OAuth callback failed: ${error.message}`)
@@ -99,72 +151,128 @@ class PlatformAuthService extends AbstractAuthModuleProvider {
   }
 
   /**
-   * TODO: 呼叫平台 API 驗證 token，回傳 UID
-   *
-   * 預期實作範例：
-   *   const res = await fetch(`${this.options_.platformApiUrl}/api/verify-token`, {
-   *     headers: { Authorization: `Bearer ${token}` },
-   *   })
-   *   if (!res.ok) throw new Error("Invalid platform token")
-   *   const data = await res.json()
-   *   return data.uid
+   * 呼叫平台 API 驗證 exchange-token，回傳 user id
    */
   private async verifyPlatformToken(token: string): Promise<string> {
-    // TODO: 替換為實際的平台 API 呼叫
-    throw new Error("verifyPlatformToken not implemented")
+    const res = await fetch(
+      `${this.getPlatformApiBaseUrl()}/fe-ex-api/common/user_info`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json;charset=UTF-8",
+          "exchange-token": token,
+        },
+        body: "{}",
+      }
+    )
+
+    if (!res.ok) {
+      let detail = ""
+      try { detail = await res.text() } catch {}
+      throw new MedusaError(
+        MedusaError.Types.UNAUTHORIZED,
+        `Platform token verification (/fe-ex-api/common/user_info) failed with status ${res.status}: ${detail}`
+      )
+    }
+
+    const json = await res.json()
+    const uid = json.data?.id ?? json.data?.uid
+
+    if ((json.code !== "0" && json.code !== 0) || !uid) {
+      throw new MedusaError(
+        MedusaError.Types.UNAUTHORIZED,
+        json.msg || "Invalid platform token"
+      )
+    }
+
+    return String(uid)
   }
 
   // ========================================
-  // 場景 2：OAuth
+  // 場景 2：ChainUp OAuth
   // ========================================
 
+  /**
+   * 建構 ChainUp OAuth 登入頁 URL 並回傳重導向
+   */
   private handleOAuthRedirect(
     data: AuthenticationInput
   ): AuthenticationResponse {
-    const callbackUrl = (data.body?.callback_url as string) ?? this.options_.callbackUrl
+    const callbackUrl =
+      (data.body?.callback_url as string) ??
+      (data.query?.callback_url as string) ??
+      this.options_.callbackUrl
 
-    /**
-     * TODO: 建構平台 OAuth 授權 URL
-     *
-     * 預期實作範例：
-     *   const authUrl = `${this.options_.platformApiUrl}/oauth/authorize` +
-     *     `?client_id=${this.options_.clientId}` +
-     *     `&redirect_uri=${encodeURIComponent(callbackUrl)}` +
-     *     `&response_type=code` +
-     *     `&scope=openid`
-     *   return { success: true, location: authUrl }
-     */
-    throw new Error("handleOAuthRedirect not implemented")
+    if (!callbackUrl) {
+      return { success: false, error: "Missing callback URL" }
+    }
+
+    const loginUrl =
+      `${this.getPlatformApiBaseUrl()}/platform/login.html` +
+      `?appKey=${encodeURIComponent(this.options_.appKey)}` +
+      `&redirectUrl=${encodeURIComponent(callbackUrl)}`
+
+    return {
+      success: true,
+      location: loginUrl,
+    }
   }
 
   /**
-   * TODO: 用 OAuth authorization code 向平台換取 UID
+   * 用 OAuth authorization code 向 ChainUp 換取 token 和 openId
    *
-   * 預期實作範例：
-   *   // 1. 用 code 換 access_token
-   *   const tokenRes = await fetch(`${this.options_.platformApiUrl}/oauth/token`, {
-   *     method: "POST",
-   *     headers: { "Content-Type": "application/json" },
-   *     body: JSON.stringify({
-   *       grant_type: "authorization_code",
-   *       code,
-   *       client_id: this.options_.clientId,
-   *       client_secret: this.options_.clientSecret,
-   *       redirect_uri: this.options_.callbackUrl,
-   *     }),
-   *   })
-   *   const tokenData = await tokenRes.json()
-   *
-   *   // 2. 用 access_token 取得 UID
-   *   const userRes = await fetch(`${this.options_.platformApiUrl}/api/userinfo`, {
-   *     headers: { Authorization: `Bearer ${tokenData.access_token}` },
-   *   })
-   *   const userData = await userRes.json()
-   *   return userData.uid
+   * POST /platformapi/chainup/open/auth/token
+   * body: { appKey, code, sign }
+   * sign = MD5(排序後 key+value 拼接 + secretKey)
    */
-  private async exchangeCodeForUid(code: string): Promise<string> {
-    // TODO: 替換為實際的平台 OAuth 呼叫
-    throw new Error("exchangeCodeForUid not implemented")
+  private async exchangeCodeForToken(
+    code: string
+  ): Promise<{ token: string; openId: string }> {
+    const params: Record<string, string> = {
+      appKey: this.options_.appKey,
+      code,
+    }
+
+    const sign = generateChainupSign(params, this.options_.secretKey)
+
+    const res = await fetch(
+      `${this.getPlatformApiBaseUrl()}/platformapi/chainup/open/auth/token`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...params, sign }),
+      }
+    )
+
+    if (!res.ok) {
+      let detail = ""
+      try { detail = await res.text() } catch {}
+      throw new MedusaError(
+        MedusaError.Types.UNAUTHORIZED,
+        `Failed to exchange authorization code (/platformapi/chainup/open/auth/token) with status ${res.status}: ${detail}`
+      )
+    }
+
+    const json = await res.json()
+
+    if (json.code !== "0" && json.code !== 0) {
+      throw new MedusaError(
+        MedusaError.Types.UNAUTHORIZED,
+        json.msg || "OAuth token exchange failed"
+      )
+    }
+
+    if (!json.data?.token) {
+      throw new MedusaError(
+        MedusaError.Types.UNAUTHORIZED,
+        "OAuth token response is missing token"
+      )
+    }
+
+    return {
+      token: json.data.token,
+      openId: json.data.openId,
+    }
   }
 
   // ========================================
@@ -181,8 +289,11 @@ class PlatformAuthService extends AbstractAuthModuleProvider {
       authIdentity = await authIdentityProviderService.retrieve({
         entity_id: uid,
       })
-    } catch (error) {
-      // 不存在 → 自動建立（註冊 + 登入）
+    } catch (error: any) {
+      if (error?.type !== MedusaError.Types.NOT_FOUND) {
+        throw error
+      }
+
       authIdentity = await authIdentityProviderService.create({
         entity_id: uid,
         provider_metadata: {},
@@ -193,6 +304,10 @@ class PlatformAuthService extends AbstractAuthModuleProvider {
     }
 
     return { success: true, authIdentity }
+  }
+
+  private getPlatformApiBaseUrl(): string {
+    return this.options_.platformApiUrl.replace(/\/+$/, "")
   }
 }
 

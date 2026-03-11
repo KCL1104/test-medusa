@@ -74,3 +74,59 @@ Join our [Discord server](https://discord.com/invite/medusajs) to meet other com
 - [Twitter](https://twitter.com/medusajs)
 - [LinkedIn](https://www.linkedin.com/company/medusajs)
 - [Medusa Blog](https://medusajs.com/blog/)
+
+## Custom Platform OAuth + ChainUp payment
+
+This project includes:
+
+- Custom auth endpoint: `POST/GET /auth/platform-login`
+- Custom payment webhook: `POST /hooks/payment/chainup`
+- ChainUp payment provider id: `pp_chainup_platform`
+
+### Required environment variables
+
+Set these in `.env` (see `.env.template`):
+
+- `PLATFORM_API_URL`
+- `PLATFORM_APP_KEY`
+- `PLATFORM_SECRET_KEY`
+- `PLATFORM_OAUTH_CALLBACK_URL` (storefront callback URL, for example `http://localhost:8000/auth/callback`)
+- `CHAINUP_PAY_COIN_SYMBOL`
+- `CHAINUP_PAYMENT_RETURN_PAGE`
+- `CHAINUP_PAYMENT_NOTIFY_PAGE` (for example `http://localhost:9000/hooks/payment/chainup`)
+- `CHAINUP_ORDER_SCENE_TYPE` (optional)
+
+### Backend tests
+
+```bash
+npm run test:unit
+npm run test:integration:http
+```
+
+> `integration:http` uses `@medusajs/test-utils`. By default, `jest.config.js` derives `DB_HOST/DB_PORT/DB_USERNAME/DB_PASSWORD` from `DATABASE_URL`, so tests use the same configured PostgreSQL host (you can still override `DB_*` explicitly if needed).
+
+### Quick API checks
+
+Request OAuth redirect URL:
+
+```bash
+curl -X POST http://localhost:9000/auth/platform-login \\
+  -H "Content-Type: application/json" \\
+  -d '{\"callback_url\":\"http://localhost:8000/auth/callback\"}'
+```
+
+Token-based login:
+
+```bash
+curl -X POST http://localhost:9000/auth/platform-login \\
+  -H "Content-Type: application/json" \\
+  -d '{\"token\":\"<exchange-token>\"}'
+```
+
+Webhook endpoint:
+
+```bash
+curl -X POST http://localhost:9000/hooks/payment/chainup \\
+  -H "Content-Type: application/json" \\
+  -d '{\"sign\":\"test-sign\",\"outOrderId\":\"payses_123\",\"orderStatus\":\"3\",\"payAmount\":\"12.5\"}'
+```
