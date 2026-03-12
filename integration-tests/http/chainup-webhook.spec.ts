@@ -49,7 +49,7 @@ medusaIntegrationTestRunner({
         expect(event).toMatchObject({
           name: PaymentWebhookEvents.WebhookReceived,
           data: {
-            provider: "pp_chainup_platform",
+            provider: "chainup_platform",
             payload: {
               data: payload,
             },

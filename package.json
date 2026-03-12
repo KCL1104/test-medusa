@@ -15,6 +15,7 @@
   "scripts": {
     "build": "medusa build",
     "seed": "medusa exec ./src/scripts/seed.ts",
+    "seed:cn-region": "medusa exec ./src/scripts/ensure-cn-region.ts || medusa exec ./src/scripts/ensure-cn-region.js",
     "seed:zero-product": "medusa exec ./src/scripts/create-zero-price-product.ts",
     "start": "medusa start",
     "dev": "medusa develop",

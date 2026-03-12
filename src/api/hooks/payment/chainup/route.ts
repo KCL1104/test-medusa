@@ -2,7 +2,8 @@ import { MedusaRequest, MedusaResponse } from "@medusajs/framework/http"
 import { Modules, PaymentWebhookEvents } from "@medusajs/framework/utils"
 import { ChainupWebhookSchemaType } from "./middlewares"
 
-const CHAINUP_PROVIDER_ID = "pp_chainup_platform"
+// PaymentWebhookEvents expects provider id without the "pp_" prefix.
+const CHAINUP_PROVIDER_ID = "chainup_platform"
 
 const getWebhookBody = (
   req: MedusaRequest<ChainupWebhookSchemaType>
@@ -39,7 +40,7 @@ export async function POST(
     if (typeof sign !== "string" || !sign.trim()) {
       return res.status(400).json({
         code: "10020",
-        msg: "Missing sign in ChainUp webhook payload",
+        msg: "Missing sign in Star Vaults webhook payload",
       })
     }
 

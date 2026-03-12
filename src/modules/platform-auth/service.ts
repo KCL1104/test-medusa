@@ -14,7 +14,7 @@ type InjectedDependencies = {
 
 class PlatformAuthService extends AbstractAuthModuleProvider {
   static identifier = "platform"
-  static DISPLAY_NAME = "Platform Auth"
+  static DISPLAY_NAME = "Star Vaults Auth"
 
   protected logger_: Logger
   protected options_: PlatformAuthOptions
@@ -145,7 +145,7 @@ class PlatformAuthService extends AbstractAuthModuleProvider {
       const uid = await this.verifyPlatformToken(token)
       return this.findOrCreateIdentity(uid, authIdentityProviderService)
     } catch (error: any) {
-      this.logger_.error(`Platform token verification failed: ${error.message}`)
+      this.logger_.error(`Star Vaults token verification failed: ${error.message}`)
       return { success: false, error: error.message }
     }
   }
@@ -171,7 +171,7 @@ class PlatformAuthService extends AbstractAuthModuleProvider {
       try { detail = await res.text() } catch {}
       throw new MedusaError(
         MedusaError.Types.UNAUTHORIZED,
-        `Platform token verification (/fe-ex-api/common/user_info) failed with status ${res.status}: ${detail}`
+        `Star Vaults token verification (/fe-ex-api/common/user_info) failed with status ${res.status}: ${detail}`
       )
     }
 
@@ -181,7 +181,7 @@ class PlatformAuthService extends AbstractAuthModuleProvider {
     if ((json.code !== "0" && json.code !== 0) || !uid) {
       throw new MedusaError(
         MedusaError.Types.UNAUTHORIZED,
-        json.msg || "Invalid platform token"
+        json.msg || "Invalid Star Vaults token"
       )
     }
 

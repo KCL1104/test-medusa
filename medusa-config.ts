@@ -63,5 +63,8 @@ module.exports = defineConfig({
         ],
       },
     },
+    {
+      resolve: "./src/modules/chainup-audit",
+    },
   ],
 })
