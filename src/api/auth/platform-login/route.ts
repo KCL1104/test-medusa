@@ -150,7 +150,7 @@ async function handlePlatformLogin(req: MedusaRequest, res: MedusaResponse) {
     }
     throw new MedusaError(
       MedusaError.Types.UNEXPECTED_STATE,
-      `Platform login failed: ${error.message}`
+      `Star Vaults login failed: ${error.message}`
     )
   }
 }

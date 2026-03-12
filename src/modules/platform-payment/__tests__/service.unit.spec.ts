@@ -51,10 +51,10 @@ describe("PlatformPaymentService", () => {
           session_id: "payses_123",
         },
       })
-    ).rejects.toThrow("Missing platform uid")
+    ).rejects.toThrow("Missing Star Vaults user identifier")
   })
 
-  it("creates ChainUp order with empty openId and provided platform uid", async () => {
+  it("creates ChainUp order with userId when openId is empty", async () => {
     fetchMock.mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -79,16 +79,59 @@ describe("PlatformPaymentService", () => {
 
     expect(result.id).toEqual("100000001")
     expect(result.status).toEqual(PaymentSessionStatus.PENDING)
+    expect(result.data?.pay_page_url).toContain("/platform/pay.html")
+    expect(result.data?.pay_page_url).toContain("orderNum=100000001")
+    expect(result.data?.pay_page_url).toContain("appKey=test_app_key")
+    expect(result.data?.return_page).toEqual("https://www.star-vaults.com/pay-return")
 
     const [url, request] = fetchMock.mock.calls[0]
     const payload = JSON.parse(request.body)
 
     expect(url).toEqual("https://www.star-vaults.com/platformapi/chainup/open/opay/createThirdOrder")
     expect(payload.appOrderId).toEqual("payses_123")
-    expect(payload.openId).toEqual("")
+    expect(payload.openId).toBeUndefined()
     expect(payload.userId).toEqual("uid_777")
     expect(payload.payCoinSymbol).toEqual("USDT")
     expect(typeof payload.sign).toEqual("string")
+  })
+
+  it("uses openId and strips query params from returnPage", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        code: "0",
+        msg: "Success",
+        data: {
+          orderNum: "100000002",
+          sign: "provider-sign",
+        },
+      }),
+    })
+
+    const service = new PlatformPaymentService({ logger: console as any }, options)
+    const result = await service.initiatePayment({
+      amount: "12.5",
+      currency_code: "usd",
+      data: {
+        session_id: "payses_456",
+        platform_uid: "uid_888",
+        open_id: "open_123",
+        return_page:
+          "https://www.star-vaults.com/tw/checkout?step=review&chainup_return=1",
+      },
+    })
+
+    const [url, request] = fetchMock.mock.calls[0]
+    const payload = JSON.parse(request.body)
+
+    expect(url).toEqual("https://www.star-vaults.com/platformapi/chainup/open/opay/createThirdOrder")
+    expect(payload.appOrderId).toEqual("payses_456")
+    expect(payload.openId).toEqual("open_123")
+    expect(payload.userId).toBeUndefined()
+    expect(payload.returnPage).toEqual("https://www.star-vaults.com/tw/checkout")
+    expect(result.data?.return_page).toEqual("https://www.star-vaults.com/tw/checkout")
+    expect(result.data?.pay_page_url).toContain("openId=open_123")
+    expect(result.data?.pay_page_url).not.toContain("userId=")
   })
 
   it("maps orderDetail success to captured payment status", async () => {
@@ -151,6 +194,109 @@ describe("PlatformPaymentService", () => {
       expect(result.data?.order_status).toEqual(orderStatus)
     }
   )
+
+  it("refunds payment with userId and idempotency key", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        code: "0",
+        msg: "Success",
+        data: {
+          orderNum: "300000001",
+        },
+      }),
+    })
+
+    const service = new PlatformPaymentService({ logger: console as any }, options)
+    const result = await service.refundPayment({
+      amount: "5",
+      data: {
+        app_order_id: "payses_123",
+        user_id: "uid_777",
+        pay_coin_symbol: "USDT",
+      },
+      context: {
+        idempotency_key: "idem-123",
+      },
+    } as any)
+
+    const [url, request] = fetchMock.mock.calls[0]
+    const payload = JSON.parse(request.body)
+
+    expect(url).toEqual("https://www.star-vaults.com/platformapi/chainup/open/opay/refundOrder")
+    expect(payload.appOrderId).toEqual("payses_123_rf_idem-123")
+    expect(payload.userId).toEqual("uid_777")
+    expect(payload.openId).toBeUndefined()
+    expect(payload.orderAmount).toEqual("5")
+    expect(payload.payCoinSymbol).toEqual("USDT")
+    expect(typeof payload.sign).toEqual("string")
+    expect(result.data?.refund_order_num).toEqual("300000001")
+    expect(result.data?.refund_app_order_id).toEqual("payses_123_rf_idem-123")
+  })
+
+  it("refunds payment when amount is BigNumber raw value object", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        code: "0",
+        msg: "Success",
+        data: {
+          orderNum: "300000002",
+        },
+      }),
+    })
+
+    const service = new PlatformPaymentService({ logger: console as any }, options)
+    const result = await service.refundPayment({
+      amount: {
+        value: "5",
+        precision: 20,
+      },
+      data: {
+        app_order_id: "payses_123",
+        user_id: "uid_777",
+        pay_coin_symbol: "USDT",
+      },
+      context: {
+        idempotency_key: "idem-raw-123",
+      },
+    } as any)
+
+    const [_, request] = fetchMock.mock.calls[0]
+    const payload = JSON.parse(request.body)
+
+    expect(payload.orderAmount).toEqual("5")
+    expect(result.data?.refund_order_num).toEqual("300000002")
+  })
+
+  it("throws when refund amount object shape is invalid", async () => {
+    const service = new PlatformPaymentService({ logger: console as any }, options)
+
+    await expect(
+      service.refundPayment({
+        amount: { foo: "bar" },
+        data: {
+          app_order_id: "payses_123",
+          user_id: "uid_777",
+        },
+      } as any)
+    ).rejects.toThrow("Invalid amount value for Star Vaults payment request.")
+
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it("throws when refund recipient identifier is missing", async () => {
+    const service = new PlatformPaymentService({ logger: console as any }, options)
+
+    await expect(
+      service.refundPayment({
+        amount: "5",
+        data: {
+          app_order_id: "payses_123",
+        },
+      })
+    ).rejects.toThrow("Missing refund recipient identifier")
+  })
 
   it("verifies webhook signature and maps success action", async () => {
     const body = {

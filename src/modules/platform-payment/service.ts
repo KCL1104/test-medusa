@@ -33,6 +33,7 @@ import {
   postChainupJson,
   type ChainupApiResponse,
 } from "../../utils/chainup-client"
+import { createChainupRefundOrder } from "../../utils/chainup-refund-order"
 import { generateChainupSign, verifyChainupSign } from "../../utils/chainup-sign"
 import type {
   ChainupCreateThirdOrderResponseData,
@@ -95,23 +96,27 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
     if (!sessionId) {
       throw new MedusaError(
         MedusaError.Types.INVALID_DATA,
-        "Missing session_id when initiating ChainUp payment session."
+        "Missing session_id when initiating Star Vaults payment session."
       )
     }
 
     const platformUid = this.resolvePlatformUid(input)
     const orderAmount = this.toAmountString(input.amount)
-    const openId = this.getStringValue(input.data?.open_id) || this.options_.openId
+    const openId =
+      this.getNonEmptyStringValue(input.data?.open_id) ||
+      this.getNonEmptyStringValue(this.options_.openId)
+    const returnPage = this.resolveReturnPage(input)
     const goods = input.data?.goods
-    const token = this.getStringValue(input.data?.token)
+    const token = this.getNonEmptyStringValue(input.data?.token)
+    const payerIdentifierPayload = openId ? { openId } : { userId: platformUid }
 
     const requestPayload: Record<string, unknown> = {
       appKey: this.options_.appKey,
       appOrderId: sessionId,
-      userId: platformUid,
+      ...payerIdentifierPayload,
       orderAmount,
       payCoinSymbol: this.options_.payCoinSymbol,
-      returnPage: this.options_.returnPage,
+      returnPage,
       notifyPage: this.options_.notifyPage,
     }
 
@@ -130,9 +135,13 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
 
     requestPayload.sign = generateChainupSign(requestPayload, this.options_.secretKey)
 
-    const { sign: _sign, ...debugPayload } = requestPayload
+    const { sign: _sign, token: _token, ...debugPayload } = requestPayload
     this.logger_.debug(
-      `ChainUp createThirdOrder request: ${JSON.stringify(debugPayload)}`
+      `Star Vaults createThirdOrder request keys=${Object.keys(debugPayload)
+        .sort()
+        .join(",")} has_token=${Boolean(_token)} identifier=${
+        openId ? "openId" : "userId"
+      } payload=${JSON.stringify(debugPayload)}`
     )
 
     const response = await postChainupJson<ChainupCreateThirdOrderResponseData>(
@@ -143,15 +152,23 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
 
     const data = this.assertChainupSuccess(
       response,
-      "Failed to create ChainUp payment order"
+      "Failed to create Star Vaults payment order"
     )
 
     if (!data.orderNum) {
       throw new MedusaError(
         MedusaError.Types.UNEXPECTED_STATE,
-        "ChainUp createThirdOrder response is missing orderNum"
+        "Star Vaults createThirdOrder response is missing orderNum"
       )
     }
+
+    const payPageUrl = this.buildPayPageUrl({
+      orderNum: data.orderNum,
+      token,
+      openId,
+      userId: platformUid,
+      providerPayUrl: data.payUrl ?? data.h5Url,
+    })
 
     return {
       id: data.orderNum,
@@ -167,6 +184,8 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
         platform_uid: platformUid,
         user_id: platformUid,
         ...(openId ? { open_id: openId } : {}),
+        return_page: returnPage,
+        pay_page_url: payPageUrl,
         chainup_response_sign: data.sign,
       },
     }
@@ -179,9 +198,14 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
     const response = await this.queryOrderDetail(orderNum, input.data)
     const data = this.assertChainupSuccess(
       response,
-      `Failed to query ChainUp order detail for orderNum=${orderNum}`
+      `Failed to query Star Vaults order detail for orderNum=${orderNum}`
     )
     const orderStatus = this.normalizeOrderStatus(data.orderStatus)
+    this.logger_.debug(
+      `Star Vaults orderDetail status order_num=${data.orderNum ?? orderNum} app_order_id=${
+        data.appOrderId ?? this.getStringValue(input.data?.app_order_id) ?? "n/a"
+      } order_status=${orderStatus}`
+    )
 
     return {
       status: this.mapOrderStatusToSessionStatus(orderStatus),
@@ -220,6 +244,20 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
       data: input.data,
       context: input.context,
     })
+    const statusData = (status.data ?? {}) as Record<string, unknown>
+    if (status.status !== PaymentSessionStatus.CAPTURED) {
+      this.logger_.warn(
+        `Star Vaults payment session not authorized yet. app_order_id=${
+          this.getStringValue(statusData.app_order_id) ?? "n/a"
+        } order_num=${
+          this.getStringValue(statusData.order_num) ??
+          this.getStringValue(statusData.provider_payment_id) ??
+          "n/a"
+        } order_status=${this.getStringValue(statusData.order_status) ?? "n/a"} mapped_status=${
+          status.status
+        }`
+      )
+    }
 
     return {
       status: status.status,
@@ -263,12 +301,56 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
   }
 
   async refundPayment(input: RefundPaymentInput): Promise<RefundPaymentOutput> {
-    throw new MedusaError(
-      MedusaError.Types.NOT_ALLOWED,
-      `Refund is not supported by ChainUp MVP provider. Requested amount: ${this.toAmountString(
-        input.amount
-      )}`
+    const paymentData = (input.data ?? {}) as Record<string, unknown>
+    const contextData = (input.context ?? {}) as Record<string, unknown>
+    const refundAmount = this.toAmountString(input.amount)
+    const sourceAppOrderId =
+      this.getNonEmptyStringValue(paymentData.app_order_id) ||
+      this.getNonEmptyStringValue(paymentData.session_id) ||
+      this.getNonEmptyStringValue(paymentData.order_num)
+
+    if (!sourceAppOrderId) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "Missing source app_order_id when refunding Star Vaults payment."
+      )
+    }
+
+    const { openId, userId } = this.resolveRefundRecipient(paymentData)
+    const refundAppOrderId =
+      this.getNonEmptyStringValue(paymentData.refund_app_order_id) ||
+      this.buildRefundAppOrderId(
+        sourceAppOrderId,
+        this.getNonEmptyStringValue(contextData.idempotency_key)
+      )
+    const payCoinSymbol =
+      this.getNonEmptyStringValue(paymentData.pay_coin_symbol) || this.options_.payCoinSymbol
+    const refundData = await createChainupRefundOrder({
+      platformApiUrl: this.getPlatformApiBaseUrl(),
+      appKey: this.options_.appKey,
+      secretKey: this.options_.secretKey,
+      appOrderId: refundAppOrderId,
+      openId,
+      userId,
+      orderAmount: refundAmount,
+      payCoinSymbol,
+      orderSceneType: this.options_.orderSceneType,
+    })
+
+    this.logger_.info(
+      `Star Vaults refundOrder success refund_app_order_id=${refundAppOrderId} refund_order_num=${refundData.orderNum}`
     )
+
+    return {
+      data: {
+        ...paymentData,
+        refund_status: "requested",
+        refund_app_order_id: refundAppOrderId,
+        refund_order_num: refundData.orderNum,
+        refund_amount: refundAmount,
+        refunded_at: new Date().toISOString(),
+      },
+    }
   }
 
   async getWebhookActionAndData(
@@ -279,7 +361,7 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
     const amount = this.getStringValue(body.payAmount ?? body.orderAmount) ?? "0"
 
     if (!this.isValidWebhookPayload(body)) {
-      this.logger_.warn("Rejected ChainUp payment webhook due to invalid signature.")
+      this.logger_.warn("Rejected Star Vaults payment webhook due to invalid signature.")
       return this.buildWebhookResult(PaymentActions.FAILED, sessionId, amount)
     }
 
@@ -397,7 +479,7 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
     if (!orderNum) {
       throw new MedusaError(
         MedusaError.Types.INVALID_DATA,
-        "Missing ChainUp order number in payment data."
+        "Missing Star Vaults order number in payment data."
       )
     }
 
@@ -421,27 +503,171 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
 
     throw new MedusaError(
       MedusaError.Types.INVALID_DATA,
-      "Missing platform uid for ChainUp payment request."
+      "Missing Star Vaults user identifier for payment request."
     )
   }
 
-  private toAmountString(value: unknown): string {
-    if (
-      typeof value === "string" ||
-      typeof value === "number" ||
-      typeof value === "bigint"
-    ) {
-      return String(value)
+  private resolveRefundRecipient(paymentData: Record<string, unknown>): {
+    openId?: string
+    userId?: string
+  } {
+    const openId = this.getNonEmptyStringValue(paymentData.open_id)
+    const userId =
+      this.getNonEmptyStringValue(paymentData.platform_uid) ||
+      this.getNonEmptyStringValue(paymentData.user_id) ||
+      this.getNonEmptyStringValue(paymentData.userId)
+
+    if (!openId && !userId) {
+      throw new MedusaError(
+        MedusaError.Types.INVALID_DATA,
+        "Missing refund recipient identifier (open_id or user_id)."
+      )
     }
 
-    if (value && typeof value === "object" && "toString" in value) {
-      return String(value)
+    return { openId, userId }
+  }
+
+  private buildRefundAppOrderId(sourceAppOrderId: string, idempotencyKey?: string): string {
+    const rawBase = sourceAppOrderId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 48)
+    const safeBase = rawBase || "refund"
+    const rawSuffix =
+      idempotencyKey ??
+      `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+    const normalizedSuffix = rawSuffix.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 32)
+    const safeSuffix = normalizedSuffix || `${Date.now()}`
+
+    return `${safeBase}_rf_${safeSuffix}`
+  }
+
+  private resolveReturnPage(input: InitiatePaymentInput): string {
+    const sourceReturnPage =
+      this.getNonEmptyStringValue(input.data?.return_page) || this.options_.returnPage
+    const normalizedReturnPage = this.normalizeReturnPage(sourceReturnPage)
+
+    if (normalizedReturnPage !== sourceReturnPage) {
+      this.logger_.debug(
+        `Star Vaults return_page sanitized to remove query/hash. source=${sourceReturnPage} normalized=${normalizedReturnPage}`
+      )
+    }
+
+    return normalizedReturnPage
+  }
+
+  private normalizeReturnPage(returnPage: string): string {
+    try {
+      const fallbackBase = new URL(this.options_.returnPage)
+      const normalized = new URL(returnPage, fallbackBase)
+      normalized.search = ""
+      normalized.hash = ""
+      return normalized.toString()
+    } catch {
+      return returnPage.split(/[?#]/)[0]
+    }
+  }
+
+  private buildPayPageUrl({
+    orderNum,
+    token,
+    openId,
+    userId,
+    providerPayUrl,
+  }: {
+    orderNum: string
+    token?: string
+    openId?: string
+    userId: string
+    providerPayUrl?: string
+  }): string {
+    const fallbackPath = "/platform/pay.html"
+    const rawPayUrl =
+      providerPayUrl || `${this.getPlatformApiBaseUrl()}${fallbackPath}`
+
+    let payUrl: URL
+    try {
+      payUrl = new URL(rawPayUrl)
+    } catch {
+      payUrl = new URL(rawPayUrl, this.getPlatformApiBaseUrl())
+    }
+
+    payUrl.searchParams.set("appKey", this.options_.appKey)
+    payUrl.searchParams.set("orderNum", orderNum)
+
+    if (openId) {
+      payUrl.searchParams.set("openId", openId)
+      payUrl.searchParams.delete("userId")
+    } else {
+      payUrl.searchParams.set("userId", userId)
+      payUrl.searchParams.delete("openId")
+    }
+
+    if (token) {
+      payUrl.searchParams.set("token", token)
+    }
+
+    return payUrl.toString()
+  }
+
+  private toAmountString(value: unknown): string {
+    const directAmount = this.getAmountPrimitive(value)
+
+    if (directAmount !== undefined) {
+      return directAmount
+    }
+
+    if (value && typeof value === "object") {
+      const amountObject = value as Record<string, unknown>
+      const rawObject =
+        amountObject.raw && typeof amountObject.raw === "object"
+          ? (amountObject.raw as Record<string, unknown>)
+          : undefined
+      const candidates = [
+        amountObject.value,
+        rawObject?.value,
+        amountObject.numeric,
+      ]
+
+      for (const candidate of candidates) {
+        const normalizedAmount = this.getAmountPrimitive(candidate)
+
+        if (normalizedAmount !== undefined) {
+          return normalizedAmount
+        }
+      }
+
+      const toStringFn = amountObject.toString
+
+      if (
+        typeof toStringFn === "function" &&
+        toStringFn !== Object.prototype.toString
+      ) {
+        const stringifiedAmount = this.getNonEmptyStringValue(toStringFn.call(value))
+
+        if (stringifiedAmount && stringifiedAmount !== "[object Object]") {
+          return stringifiedAmount
+        }
+      }
     }
 
     throw new MedusaError(
       MedusaError.Types.INVALID_DATA,
-      "Invalid amount value for ChainUp payment request."
+      "Invalid amount value for Star Vaults payment request."
     )
+  }
+
+  private getAmountPrimitive(value: unknown): string | undefined {
+    if (typeof value === "number") {
+      return Number.isFinite(value) ? String(value) : undefined
+    }
+
+    if (typeof value === "bigint") {
+      return String(value)
+    }
+
+    if (typeof value === "string") {
+      return this.getNonEmptyStringValue(value)
+    }
+
+    return undefined
   }
 
   private getStringValue(value: unknown): string | undefined {
@@ -454,6 +680,11 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
     }
 
     return undefined
+  }
+
+  private getNonEmptyStringValue(value: unknown): string | undefined {
+    const normalized = this.getStringValue(value)?.trim()
+    return normalized ? normalized : undefined
   }
 
   private getPlatformApiBaseUrl(): string {

@@ -63,7 +63,9 @@ export default async function seedDemoData({ container }: ExecArgs) {
   const salesChannelModuleService = container.resolve(Modules.SALES_CHANNEL);
   const storeModuleService = container.resolve(Modules.STORE);
 
-  const countries = ["gb", "de", "dk", "se", "fr", "es", "it"];
+  const europeCountries = ["gb", "de", "dk", "se", "fr", "es", "it"];
+  const chinaCountries = ["cn"];
+  const taxRegionCountries = [...europeCountries, ...chinaCountries];
 
   logger.info("Seeding store data...");
   const [store] = await storeModuleService.listStores();
@@ -98,6 +100,9 @@ export default async function seedDemoData({ container }: ExecArgs) {
         {
           currency_code: "usd",
         },
+        {
+          currency_code: "cny",
+        },
       ],
     },
   });
@@ -117,18 +122,28 @@ export default async function seedDemoData({ container }: ExecArgs) {
         {
           name: "Europe",
           currency_code: "eur",
-          countries,
+          countries: europeCountries,
+          payment_providers: ["pp_system_default", "pp_chainup_platform"],
+        },
+        {
+          name: "China",
+          currency_code: "cny",
+          countries: chinaCountries,
           payment_providers: ["pp_system_default", "pp_chainup_platform"],
         },
       ],
     },
   });
-  const region = regionResult[0];
+  const europeRegion = regionResult.find((entry) => entry.name === "Europe");
+
+  if (!europeRegion) {
+    throw new Error("Europe region was not created during seed initialization.");
+  }
   logger.info("Finished seeding regions.");
 
   logger.info("Seeding tax regions...");
   await createTaxRegionsWorkflow(container).run({
-    input: countries.map((country_code) => ({
+    input: taxRegionCountries.map((country_code) => ({
       country_code,
       provider_id: "tp_system",
     })),
@@ -265,7 +280,7 @@ export default async function seedDemoData({ container }: ExecArgs) {
             amount: 10,
           },
           {
-            region_id: region.id,
+            region_id: europeRegion.id,
             amount: 10,
           },
         ],
@@ -303,7 +318,7 @@ export default async function seedDemoData({ container }: ExecArgs) {
             amount: 10,
           },
           {
-            region_id: region.id,
+            region_id: europeRegion.id,
             amount: 10,
           },
         ],

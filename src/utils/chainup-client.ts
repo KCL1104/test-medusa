@@ -39,7 +39,7 @@ export const postChainupJson = async <TData>(
     const redactedPayload = showSign ? payload : { ...payload, sign: "[REDACTED]" }
     const fullUrl = `${normalizeChainupBaseUrl(baseUrl)}${path}`
     const requestInfo =
-      `ChainUp request failed:\n` +
+      `Star Vaults request failed:\n` +
       `POST ${fullUrl}\n` +
       `Content-Type: application/json\n\n` +
       `${JSON.stringify(redactedPayload, null, 2)}\n\n` +

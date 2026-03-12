@@ -82,6 +82,9 @@ This project includes:
 - Custom auth endpoint: `POST/GET /auth/platform-login`
 - Custom payment webhook: `POST /hooks/payment/chainup`
 - ChainUp payment provider id: `pp_chainup_platform`
+- Store refund request endpoint: `POST /store/refund-requests`
+- Admin refund review endpoint: `POST /admin/refund-requests/:id`
+- Admin coin grant endpoint: `POST /admin/chainup/coin-grants`
 
 ### Required environment variables
 
@@ -92,6 +95,7 @@ Set these in `.env` (see `.env.template`):
 - `PLATFORM_SECRET_KEY`
 - `PLATFORM_OAUTH_CALLBACK_URL` (storefront callback URL, for example `http://localhost:8000/auth/callback`)
 - `CHAINUP_PAY_COIN_SYMBOL`
+- `CHAINUP_GRANT_DEFAULT_COIN_SYMBOL` (optional, fallback to `CHAINUP_PAY_COIN_SYMBOL`)
 - `CHAINUP_PAYMENT_RETURN_PAGE`
 - `CHAINUP_PAYMENT_NOTIFY_PAGE` (for example `http://localhost:9000/hooks/payment/chainup`)
 - `CHAINUP_ORDER_SCENE_TYPE` (optional)
@@ -129,4 +133,50 @@ Webhook endpoint:
 curl -X POST http://localhost:9000/hooks/payment/chainup \\
   -H "Content-Type: application/json" \\
   -d '{\"sign\":\"test-sign\",\"outOrderId\":\"payses_123\",\"orderStatus\":\"3\",\"payAmount\":\"12.5\"}'
+```
+
+Store refund request (customer token required):
+
+```bash
+curl -X POST http://localhost:9000/store/refund-requests \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer <customer-jwt>" \\
+  -d '{
+    "order_id": "order_123",
+    "payment_id": "pay_123",
+    "amount": "5.5",
+    "reason": "return",
+    "note": "Request partial refund",
+    "idempotency_key": "refund_req_123"
+  }'
+```
+
+Admin review refund request (approve or reject):
+
+```bash
+curl -X POST http://localhost:9000/admin/refund-requests/refreq_123 \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer <admin-jwt>" \\
+  -d '{
+    "action": "approve",
+    "amount": "5.5",
+    "note": "Approved by support"
+  }'
+```
+
+Admin coin grant:
+
+```bash
+curl -X POST http://localhost:9000/admin/chainup/coin-grants \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer <admin-jwt>" \\
+  -d '{
+    "app_order_id": "grant_20260312_001",
+    "amount": "3",
+    "pay_coin_symbol": "USDT",
+    "user_id": "uid_777",
+    "metadata": {
+      "source": "support_adjustment"
+    }
+  }'
 ```
