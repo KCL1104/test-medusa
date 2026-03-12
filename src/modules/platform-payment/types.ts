@@ -44,6 +44,8 @@ export type PlatformPaymentOptions = {
 export type ChainupCreateThirdOrderResponseData = {
   orderNum?: string
   sign?: string
+  payUrl?: string
+  h5Url?: string
 }
 
 export type ChainupOrderDetailResponseData = {

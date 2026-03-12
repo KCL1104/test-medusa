@@ -4,6 +4,20 @@ import { ChainupWebhookSchemaType } from "./middlewares"
 
 const CHAINUP_PROVIDER_ID = "pp_chainup_platform"
 
+const getWebhookBody = (
+  req: MedusaRequest<ChainupWebhookSchemaType>
+): Record<string, unknown> => {
+  const payload = (
+    req.validatedBody ?? (req.body as Record<string, unknown> | undefined)
+  ) as unknown
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return {}
+  }
+
+  return payload as Record<string, unknown>
+}
+
 export async function POST(
   req: MedusaRequest<ChainupWebhookSchemaType>,
   res: MedusaResponse
@@ -19,6 +33,15 @@ export async function POST(
     const requestWithRawBody = req as MedusaRequest<ChainupWebhookSchemaType> & {
       rawBody?: string | Buffer
     }
+    const webhookBody = getWebhookBody(req)
+    const sign = webhookBody.sign
+
+    if (typeof sign !== "string" || !sign.trim()) {
+      return res.status(400).json({
+        code: "10020",
+        msg: "Missing sign in ChainUp webhook payload",
+      })
+    }
 
     await eventBus.emit(
       {
@@ -26,7 +49,7 @@ export async function POST(
         data: {
           provider: CHAINUP_PROVIDER_ID,
           payload: {
-            data: req.validatedBody,
+            data: webhookBody,
             rawData: requestWithRawBody.rawBody,
             headers: req.headers,
           },

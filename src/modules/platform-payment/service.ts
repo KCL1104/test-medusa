@@ -101,17 +101,21 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
 
     const platformUid = this.resolvePlatformUid(input)
     const orderAmount = this.toAmountString(input.amount)
-    const openId = this.getStringValue(input.data?.open_id) || this.options_.openId
+    const openId =
+      this.getNonEmptyStringValue(input.data?.open_id) ||
+      this.getNonEmptyStringValue(this.options_.openId)
+    const returnPage = this.resolveReturnPage(input)
     const goods = input.data?.goods
-    const token = this.getStringValue(input.data?.token)
+    const token = this.getNonEmptyStringValue(input.data?.token)
+    const payerIdentifierPayload = openId ? { openId } : { userId: platformUid }
 
     const requestPayload: Record<string, unknown> = {
       appKey: this.options_.appKey,
       appOrderId: sessionId,
-      userId: platformUid,
+      ...payerIdentifierPayload,
       orderAmount,
       payCoinSymbol: this.options_.payCoinSymbol,
-      returnPage: this.options_.returnPage,
+      returnPage,
       notifyPage: this.options_.notifyPage,
     }
 
@@ -130,9 +134,13 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
 
     requestPayload.sign = generateChainupSign(requestPayload, this.options_.secretKey)
 
-    const { sign: _sign, ...debugPayload } = requestPayload
+    const { sign: _sign, token: _token, ...debugPayload } = requestPayload
     this.logger_.debug(
-      `ChainUp createThirdOrder request: ${JSON.stringify(debugPayload)}`
+      `ChainUp createThirdOrder request keys=${Object.keys(debugPayload)
+        .sort()
+        .join(",")} has_token=${Boolean(_token)} identifier=${
+        openId ? "openId" : "userId"
+      } payload=${JSON.stringify(debugPayload)}`
     )
 
     const response = await postChainupJson<ChainupCreateThirdOrderResponseData>(
@@ -153,6 +161,14 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
       )
     }
 
+    const payPageUrl = this.buildPayPageUrl({
+      orderNum: data.orderNum,
+      token,
+      openId,
+      userId: platformUid,
+      providerPayUrl: data.payUrl ?? data.h5Url,
+    })
+
     return {
       id: data.orderNum,
       status: PaymentSessionStatus.PENDING,
@@ -167,6 +183,8 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
         platform_uid: platformUid,
         user_id: platformUid,
         ...(openId ? { open_id: openId } : {}),
+        return_page: returnPage,
+        pay_page_url: payPageUrl,
         chainup_response_sign: data.sign,
       },
     }
@@ -182,6 +200,11 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
       `Failed to query ChainUp order detail for orderNum=${orderNum}`
     )
     const orderStatus = this.normalizeOrderStatus(data.orderStatus)
+    this.logger_.debug(
+      `ChainUp orderDetail status order_num=${data.orderNum ?? orderNum} app_order_id=${
+        data.appOrderId ?? this.getStringValue(input.data?.app_order_id) ?? "n/a"
+      } order_status=${orderStatus}`
+    )
 
     return {
       status: this.mapOrderStatusToSessionStatus(orderStatus),
@@ -220,6 +243,20 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
       data: input.data,
       context: input.context,
     })
+    const statusData = (status.data ?? {}) as Record<string, unknown>
+    if (status.status !== PaymentSessionStatus.CAPTURED) {
+      this.logger_.warn(
+        `ChainUp payment session not authorized yet. app_order_id=${
+          this.getStringValue(statusData.app_order_id) ?? "n/a"
+        } order_num=${
+          this.getStringValue(statusData.order_num) ??
+          this.getStringValue(statusData.provider_payment_id) ??
+          "n/a"
+        } order_status=${this.getStringValue(statusData.order_status) ?? "n/a"} mapped_status=${
+          status.status
+        }`
+      )
+    }
 
     return {
       status: status.status,
@@ -425,6 +462,74 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
     )
   }
 
+  private resolveReturnPage(input: InitiatePaymentInput): string {
+    const sourceReturnPage =
+      this.getNonEmptyStringValue(input.data?.return_page) || this.options_.returnPage
+    const normalizedReturnPage = this.normalizeReturnPage(sourceReturnPage)
+
+    if (normalizedReturnPage !== sourceReturnPage) {
+      this.logger_.debug(
+        `ChainUp return_page sanitized to remove query/hash. source=${sourceReturnPage} normalized=${normalizedReturnPage}`
+      )
+    }
+
+    return normalizedReturnPage
+  }
+
+  private normalizeReturnPage(returnPage: string): string {
+    try {
+      const fallbackBase = new URL(this.options_.returnPage)
+      const normalized = new URL(returnPage, fallbackBase)
+      normalized.search = ""
+      normalized.hash = ""
+      return normalized.toString()
+    } catch {
+      return returnPage.split(/[?#]/)[0]
+    }
+  }
+
+  private buildPayPageUrl({
+    orderNum,
+    token,
+    openId,
+    userId,
+    providerPayUrl,
+  }: {
+    orderNum: string
+    token?: string
+    openId?: string
+    userId: string
+    providerPayUrl?: string
+  }): string {
+    const fallbackPath = "/platform/pay.html"
+    const rawPayUrl =
+      providerPayUrl || `${this.getPlatformApiBaseUrl()}${fallbackPath}`
+
+    let payUrl: URL
+    try {
+      payUrl = new URL(rawPayUrl)
+    } catch {
+      payUrl = new URL(rawPayUrl, this.getPlatformApiBaseUrl())
+    }
+
+    payUrl.searchParams.set("appKey", this.options_.appKey)
+    payUrl.searchParams.set("orderNum", orderNum)
+
+    if (openId) {
+      payUrl.searchParams.set("openId", openId)
+      payUrl.searchParams.delete("userId")
+    } else {
+      payUrl.searchParams.set("userId", userId)
+      payUrl.searchParams.delete("openId")
+    }
+
+    if (token) {
+      payUrl.searchParams.set("token", token)
+    }
+
+    return payUrl.toString()
+  }
+
   private toAmountString(value: unknown): string {
     if (
       typeof value === "string" ||
@@ -454,6 +559,11 @@ class PlatformPaymentService extends AbstractPaymentProvider<PlatformPaymentOpti
     }
 
     return undefined
+  }
+
+  private getNonEmptyStringValue(value: unknown): string | undefined {
+    const normalized = this.getStringValue(value)?.trim()
+    return normalized ? normalized : undefined
   }
 
   private getPlatformApiBaseUrl(): string {

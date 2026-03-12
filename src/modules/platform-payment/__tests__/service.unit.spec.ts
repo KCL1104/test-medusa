@@ -54,7 +54,7 @@ describe("PlatformPaymentService", () => {
     ).rejects.toThrow("Missing platform uid")
   })
 
-  it("creates ChainUp order with empty openId and provided platform uid", async () => {
+  it("creates ChainUp order with userId when openId is empty", async () => {
     fetchMock.mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -79,16 +79,59 @@ describe("PlatformPaymentService", () => {
 
     expect(result.id).toEqual("100000001")
     expect(result.status).toEqual(PaymentSessionStatus.PENDING)
+    expect(result.data?.pay_page_url).toContain("/platform/pay.html")
+    expect(result.data?.pay_page_url).toContain("orderNum=100000001")
+    expect(result.data?.pay_page_url).toContain("appKey=test_app_key")
+    expect(result.data?.return_page).toEqual("https://www.star-vaults.com/pay-return")
 
     const [url, request] = fetchMock.mock.calls[0]
     const payload = JSON.parse(request.body)
 
     expect(url).toEqual("https://www.star-vaults.com/platformapi/chainup/open/opay/createThirdOrder")
     expect(payload.appOrderId).toEqual("payses_123")
-    expect(payload.openId).toEqual("")
+    expect(payload.openId).toBeUndefined()
     expect(payload.userId).toEqual("uid_777")
     expect(payload.payCoinSymbol).toEqual("USDT")
     expect(typeof payload.sign).toEqual("string")
+  })
+
+  it("uses openId and strips query params from returnPage", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        code: "0",
+        msg: "Success",
+        data: {
+          orderNum: "100000002",
+          sign: "provider-sign",
+        },
+      }),
+    })
+
+    const service = new PlatformPaymentService({ logger: console as any }, options)
+    const result = await service.initiatePayment({
+      amount: "12.5",
+      currency_code: "usd",
+      data: {
+        session_id: "payses_456",
+        platform_uid: "uid_888",
+        open_id: "open_123",
+        return_page:
+          "https://www.star-vaults.com/tw/checkout?step=review&chainup_return=1",
+      },
+    })
+
+    const [url, request] = fetchMock.mock.calls[0]
+    const payload = JSON.parse(request.body)
+
+    expect(url).toEqual("https://www.star-vaults.com/platformapi/chainup/open/opay/createThirdOrder")
+    expect(payload.appOrderId).toEqual("payses_456")
+    expect(payload.openId).toEqual("open_123")
+    expect(payload.userId).toBeUndefined()
+    expect(payload.returnPage).toEqual("https://www.star-vaults.com/tw/checkout")
+    expect(result.data?.return_page).toEqual("https://www.star-vaults.com/tw/checkout")
+    expect(result.data?.pay_page_url).toContain("openId=open_123")
+    expect(result.data?.pay_page_url).not.toContain("userId=")
   })
 
   it("maps orderDetail success to captured payment status", async () => {
